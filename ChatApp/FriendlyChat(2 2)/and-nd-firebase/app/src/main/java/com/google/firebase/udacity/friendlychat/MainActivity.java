@@ -17,6 +17,7 @@ package com.google.firebase.udacity.friendlychat;
 
 import android.app.Activity;
 import android.content.Intent;
+import android.net.Uri;
 import android.os.Bundle;
 import android.support.annotation.NonNull;
 import android.support.v7.app.AppCompatActivity;
@@ -36,6 +37,8 @@ import android.widget.ProgressBar;
 import android.widget.Toast;
 
 import com.firebase.ui.auth.AuthUI;
+import com.google.android.gms.tasks.OnFailureListener;
+import com.google.android.gms.tasks.OnSuccessListener;
 import com.google.firebase.auth.FirebaseAuth;
 import com.google.firebase.auth.FirebaseUser;
 import com.google.firebase.database.ChildEventListener;
@@ -43,25 +46,37 @@ import com.google.firebase.database.DataSnapshot;
 import com.google.firebase.database.DatabaseError;
 import com.google.firebase.database.DatabaseReference;
 import com.google.firebase.database.FirebaseDatabase;
+import com.google.firebase.remoteconfig.FirebaseRemoteConfig;
+import com.google.firebase.remoteconfig.FirebaseRemoteConfigSettings;
+import com.google.firebase.storage.FirebaseStorage;
+import com.google.firebase.storage.StorageReference;
+import com.google.firebase.storage.UploadTask;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import static android.widget.Toast.LENGTH_SHORT;
 
-public class MainActivity extends AppCompatActivity {
+public class MainActivity extends AppCompatActivity implements View.OnClickListener {
 
     private static final String TAG = "MainActivity";
 
     public static final String ANONYMOUS = "anonymous";
     public static final int DEFAULT_MSG_LENGTH_LIMIT = 1000;
     public static final int RC_SIGN_IN = 1;
+    private static final int RC_PHOTO_PICKED = 2;
+    private static final String FRIENDLY_MSG_LENGTH = "friendly_msg_length" ;
 
     FirebaseDatabase mDataBase;
     DatabaseReference mDataBaseRef;
     FirebaseAuth mFirebaseAuth;
+    StorageReference mFireBaseStorageReference;
     FirebaseAuth.AuthStateListener mAuthStateListener;
     ChildEventListener mchildEventListener;
+    FirebaseStorage mFireBaseStorage;
+    FirebaseRemoteConfig mFirebaseRemoteconfig;
 
 
     private ListView mMessageListView;
@@ -72,8 +87,11 @@ public class MainActivity extends AppCompatActivity {
     private Button mSendButton;
     Activity mActivity;
 
+    List<FriendlyMessage> friendlyMessages;
+
 
     private String mUsername;
+
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -87,9 +105,13 @@ public class MainActivity extends AppCompatActivity {
         //Initialize DataBase
 
         mDataBase = FirebaseDatabase.getInstance();
-        mDataBaseRef = mDataBase.getReference("message");
+        mFireBaseStorage = FirebaseStorage.getInstance();
+
+        mDataBaseRef = mDataBase.getReference().child("message");
+        mFireBaseStorageReference = mFireBaseStorage.getReference().child("chat_photos");
 
         mFirebaseAuth = FirebaseAuth.getInstance();
+        mFirebaseRemoteconfig = FirebaseRemoteConfig.getInstance();
 
 
         // Initialize references to views
@@ -100,20 +122,14 @@ public class MainActivity extends AppCompatActivity {
         mSendButton = (Button) findViewById(R.id.sendButton);
 
         // Initialize message ListView and its adapter
-        final List<FriendlyMessage> friendlyMessages = new ArrayList<>();
+        friendlyMessages = new ArrayList<>();
         mMessageAdapter = new MessageAdapter(this, R.layout.item_message, friendlyMessages);
         mMessageListView.setAdapter(mMessageAdapter);
 
         // Initialize progress bar
         mProgressBar.setVisibility(ProgressBar.INVISIBLE);
-
-        // ImagePickerButton shows an image picker to upload a image for a message
-        mPhotoPickerButton.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View view) {
-                // TODO: Fire an intent to show an image picker
-            }
-        });
+        mSendButton.setOnClickListener(this);
+        mPhotoPickerButton.setOnClickListener(this);
 
         // Enable Send button when there's text to send
         mMessageEditText.addTextChangedListener(new TextWatcher() {
@@ -136,19 +152,6 @@ public class MainActivity extends AppCompatActivity {
         });
         mMessageEditText.setFilters(new InputFilter[]{new InputFilter.LengthFilter(DEFAULT_MSG_LENGTH_LIMIT)});
 
-        // Send button sends a message and clears the EditText
-        mSendButton.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View view) {
-                // TODO: Send messages on click
-                FriendlyMessage friendlyMessage = new FriendlyMessage(mMessageEditText.getText().toString(), mUsername, null);
-                mDataBaseRef.push().setValue(friendlyMessage);
-                // Clear input box
-                mMessageEditText.setText("");
-            }
-        });
-
-
         mAuthStateListener = new FirebaseAuth.AuthStateListener() {
             @Override
             public void onAuthStateChanged(@NonNull FirebaseAuth firebaseAuth) {
@@ -169,6 +172,15 @@ public class MainActivity extends AppCompatActivity {
                 }
             }
         };
+
+        FirebaseRemoteConfigSettings configSettings = new FirebaseRemoteConfigSettings.Builder().setDeveloperModeEnabled(BuildConfig.DEBUG).build();
+        mFirebaseRemoteconfig.setConfigSettings(configSettings);
+
+        Map<String, Object> defaultConfigMap = new HashMap<>();
+        defaultConfigMap.put(FRIENDLY_MSG_LENGTH, DEFAULT_MSG_LENGTH_LIMIT);
+        mFirebaseRemoteconfig.setDefaults(defaultConfigMap);
+
+        fetchConfig();
     }
 
     private void onUserLogin(String displayName) {
@@ -191,13 +203,19 @@ public class MainActivity extends AppCompatActivity {
                 @Override
                 public void onChildAdded(DataSnapshot dataSnapshot, String s) {
                     FriendlyMessage retrievedMessage = dataSnapshot.getValue(FriendlyMessage.class);
+                    friendlyMessages.add(retrievedMessage);
                     Log.d("Ankush", " " + retrievedMessage.getName());
-                    mMessageAdapter.add(retrievedMessage);
+                    mMessageAdapter.notifyDataSetChanged();
                 }
 
                 @Override
                 public void onChildChanged(DataSnapshot dataSnapshot, String s) {
-
+                    FriendlyMessage retrivedMessage = dataSnapshot.getValue(FriendlyMessage.class);
+                    if(retrivedMessage !=null){
+                        friendlyMessages.remove(friendlyMessages.size() - 1);
+                        friendlyMessages.add(retrivedMessage);
+                        mMessageAdapter.notifyDataSetChanged();
+                    }
                 }
 
                 @Override
@@ -270,5 +288,66 @@ public class MainActivity extends AppCompatActivity {
                 finish();
             }
         }
+
+        if(requestCode == RC_PHOTO_PICKED && resultCode == RESULT_OK){
+            Uri photoURI = data.getData();
+            StorageReference imageRef = mFireBaseStorageReference.child(photoURI.getLastPathSegment());
+            imageRef.putFile(photoURI).addOnSuccessListener(this, new OnSuccessListener<UploadTask.TaskSnapshot>() {
+                @Override
+                public void onSuccess(UploadTask.TaskSnapshot taskSnapshot) {
+                    Uri downloadUrl = taskSnapshot.getDownloadUrl();
+
+                    FriendlyMessage friendlyMessage = new FriendlyMessage(null, mUsername, downloadUrl.toString());
+                    mDataBaseRef.push().setValue(friendlyMessage);
+                }
+            });
+        }
+    }
+
+    @Override
+    public void onClick(View v) {
+        int id = v.getId();
+        switch(id) {
+            case R.id.sendButton :
+                FriendlyMessage friendlyMessage = new FriendlyMessage(mMessageEditText.getText().toString(), mUsername, null);
+                mDataBaseRef.push().setValue(friendlyMessage);
+                // Clear input box
+                mMessageEditText.setText("");
+                break;
+            case R.id.photoPickerButton:
+                Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
+                intent.setType("image/jpeg");
+                intent.putExtra(Intent.EXTRA_LOCAL_ONLY, true);
+                startActivityForResult(intent.createChooser(intent, "Choose Photo From"), RC_PHOTO_PICKED);
+        }
+    }
+
+    void fetchConfig(){
+        long cacheExpiration = 3600;
+
+        if(mFirebaseRemoteconfig.getInfo().getConfigSettings().isDeveloperModeEnabled()){
+            cacheExpiration = 0;
+        }
+
+        mFirebaseRemoteconfig.fetch(cacheExpiration).addOnSuccessListener(new OnSuccessListener<Void>() {
+            @Override
+            public void onSuccess(Void aVoid) {
+                 if(mFirebaseRemoteconfig.activateFetched()) {
+                     applyRetrievedLength();
+                 }
+            }
+        }).addOnFailureListener(new OnFailureListener() {
+            @Override
+            public void onFailure(@NonNull Exception e) {
+                Log.d(TAG, "Error fetching confgg");
+                applyRetrievedLength();
+            }
+        });
+    }
+
+    void applyRetrievedLength(){
+        Long friendly_msg_length = mFirebaseRemoteconfig.getLong(FRIENDLY_MSG_LENGTH);
+        mMessageEditText.setFilters(new InputFilter[]{new InputFilter.LengthFilter((friendly_msg_length).intValue())});
+        Log.d(TAG, FRIENDLY_MSG_LENGTH + "=" + friendly_msg_length);
     }
 }
